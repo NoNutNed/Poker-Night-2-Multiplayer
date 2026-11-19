@@ -4,6 +4,8 @@ Play a Poker Night 2 tournament with friends. One player hosts, up to four frien
 
 ## Getting started
 
+(Note: This entire github page was written by AI, including the play guide, and all of the mod's code.)
+
 Use a Windows copy of Poker Night 2 and the same mod release on every machine. See the [play guide](PLAY_GUIDE.md) for installation, hosting, joining, and removal.
 
 This is an early public test for groups on a trusted private network. It supports standard Hold ’em, shared Deal prompts, spectating, and post-match votes for Rematch or Return to Lobby. Treat the table as casual play. The game data synchronized between players includes hidden cards.
