@@ -13,10 +13,22 @@ local fields,buttons={},{}
 local pool,scene={},nil
 local layout=nil
 local nativeDialog,pendingClick,consumeRelease=false,nil,false
-local selected,count,address=1,2,'127.0.0.1'
+local count,address=2,'127.0.0.1'
 local notice=''
 local function trace(message) if type(Print)=='function' then Print('COOP_LOBBY '..message) end end
 local names={'Brock','Claptrap','Ash','Sam'}
+-- Futura and the blue highlight follow the shipped front-end overlay.
+local white={r=1,g=1,b=1,a=1}
+local muted={r=0.69,g=0.74,b=0.82,a=1}
+local hoverBlue={r=0.27451,g=0.447059,b=0.843137,a=1}
+local styles={
+  title={scale=0.9},
+  caption={scale=0.48,color={r=0.53,g=0.70,b=1,a=1}},
+  detail={scale=0.48,color=muted},
+  unavailable={scale=0.65,color=muted},
+  selected={scale=0.65,background={r=0.16,g=0.29,b=0.55,a=1}},
+}
+local plain={scale=0.65}
 local function canOpen()
   return InGameMenu_IsMenuActive() and InGameMenu_InMenuFromBoot() and not InGameMenu_IsStartingGame() and
     (not kMenuPage_MainMenu or InGameMenu_GetCurrentPage()==kMenuPage_MainMenu) and not Credits_AreRunning()
@@ -42,12 +54,30 @@ local function menuLayout()
   -- PN2's projection uses a 0.75 degree conversion before the half-angle
   -- (native constant 0.013089969754 at 0x94d554), rather than raw vertical FOV.
   local halfHeight=(camera.z-header.z)*math.tan(fov*scale*math.pi/480)
-  return {x=camera.x,y=camera.y,z=header.z,h=halfHeight,w=halfHeight*((type(aspect)=='number' and aspect>0) and aspect or resolution.x/resolution.y)}
+  local width,height=COOP_LobbyInput('size')
+  local measured=width and height and width>0 and height>0
+  local compactWidth=measured and width or resolution.x
+  local compactHeight=measured and height or resolution.y
+  local ratio=(type(aspect)=='number' and aspect>0) and aspect or resolution.x/resolution.y
+  return {x=camera.x,y=camera.y,z=header.z,h=halfHeight,w=halfHeight*ratio,
+    compact=compactWidth<1366 or compactHeight<768,
+    clientWidth=measured and width or 0,clientHeight=measured and height or 0,
+    renderWidth=resolution.x,renderHeight=resolution.y}
 end
-local function set(name,text,x,y,button)
+local function paint(name,agent,background)
+  local key=name..'_background'
+  background=background or false
+  if fields[key]==background then return end
+  if background then AgentSetProperty(agent,'Text Background Color',background) end
+  AgentSetProperty(agent,'Text Background',background~=false)
+  fields[key]=background
+end
+local function set(name,text,x,y,button,style,width,height)
   local agent=pool[name]
   if not agent or not AgentExists(agent) then
     fields[name]=nil
+    fields[name..'_style']=nil
+    fields[name..'_background']=nil
     agent='coop_lobby_'..name
     AgentCreate(agent,'module_text.prop',Vector(0,0,0),nil,scene,false,false)
     pool[name]=agent
@@ -56,13 +86,27 @@ local function set(name,text,x,y,button)
     AgentSetProperty(agent,'Text Alignment Horizontal','Left Justified')
     AgentSetProperty(agent,'Text Alignment Vertical','Top')
     AgentSetProperty(agent,'Text Render Layer',29000)
-    AgentSetProperty(agent,'Text Color',{r=1,g=1,b=1,a=1})
-    AgentSetProperty(agent,'Text Scale',name=='title' and 0.9 or 0.65)
   end
+  style=style or (name=='title' and styles.title or plain)
   if fields[name]~=text then AgentSetProperty(agent,'Text String',text);fields[name]=text end
+  local scale=style.scale
+  if layout.compact or page=='lobby' then
+    scale=scale*math.min(1,layout.w/(layout.h*16/9))*(layout.compact and 0.78 or 0.9)
+  end
+  if fields[name..'_style']~=style or fields[name..'_scale']~=scale then
+    AgentSetProperty(agent,'Text Color',style.color or white)
+    AgentSetProperty(agent,'Text Scale',scale)
+    fields[name..'_style']=style
+    fields[name..'_scale']=scale
+  end
   AgentSetPos(agent,Vector(layout.x+(2*x-1)*layout.w,layout.y+(1-2*y)*layout.h,layout.z))
   AgentHide(agent,false)
-  if button then buttons[#buttons+1]={name=name,x=x,y=y,w=0.28,h=0.055,run=button} end
+  if button then
+    buttons[#buttons+1]={name=name,x=x,y=y,w=width or 0.28,h=height or 0.055,
+      run=button,background=style.background,agent=agent}
+  elseif name~='panel' then
+    paint(name,agent,style.background)
+  end
 end
 local function hide()
   for _,agent in pairs(pool) do if AgentExists(agent) then AgentHide(agent,true) end end
@@ -83,6 +127,14 @@ end
 local function hit(x,y)
   for _,button in ipairs(buttons) do
     if x>=button.x and x<=button.x+button.w and y>=button.y and y<=button.y+button.h then return button end
+  end
+end
+local function drawHover(focused)
+  local device=focused and CursorGetPos()
+  local cursor=device and DeviceToViewport(device)
+  local hovered=cursor and hit(cursor.x,cursor.y)
+  for _,button in ipairs(buttons) do
+    paint(button.name,button.agent,button==hovered and hoverBlue or button.background)
   end
 end
 -- Use the same engine events and device-to-viewport cursor conversion as the
@@ -186,10 +238,76 @@ local function drawResults(s)
   set('return','Return to lobby ('..returns..'/'..total..')',0.57,0.69,function() resultsVote(selectedLobby and 0 or 2) end)
   if yourChoice then set('resultWait','Your vote: '..yourChoice..'. Waiting for everyone to agree.',0.25,0.79) end
 end
+local function drawJoinedLobby(s)
+  local localIndex=s.guest and s.peer-1 or 0
+  local own=s.guest and s.seats[localIndex] or nil
+  local taken,waiting={},{}
+  local readyCount,missing=0,0
+  local compact=layout.compact
+  set('tableHeading','AT THE TABLE',0.22,compact and 0.47 or 0.284,nil,styles.caption)
+  set('castHeading',s.guest and 'CHOOSE A CHARACTER' or 'CAST SEATS',compact and 0.22 or 0.56,
+    compact and 0.238 or 0.284,nil,styles.caption)
+  for i=0,s.count do
+    local seat=s.seats[i] or 0
+    local joined=i==0 or bit(s.connected,i-1)
+    local isReady=joined and bit(s.ready,i)
+    local name=i==0 and 'The Player' or names[seat] or ('Guest '..i)
+    if i>0 and joined and seat>0 then taken[seat]=true end
+    if isReady then readyCount=readyCount+1
+    elseif joined then waiting[#waiting+1]=i==localIndex and 'you' or (i==0 and 'Host' or name)
+    else missing=missing+1 end
+    local label=not joined and 'Open' or isReady and 'Ready' or (i>0 and seat==0 and 'Choosing' or 'Not ready')
+    local suffix=i==0 and ' (Host)' or (i==localIndex and ' (You)' or '')
+    local y=(compact and 0.506 or 0.34)+i*(compact and 0.044 or 0.062)
+    set(i==0 and 'hostrow' or 'row'..i,name..suffix,0.22,y,nil,joined and plain or styles.unavailable)
+    set('rowStatus'..i,label,compact and 0.635 or 0.449,y+0.006,nil,isReady and styles.caption or styles.detail)
+  end
+  for seat,name in ipairs(names) do
+    local yours=seat==own
+    local occupied=taken[seat]
+    local choose
+    if s.guest and s.id~=0 and localIndex>=1 and s.phase==1 and not occupied and not yours then
+      choose=function() action('claim',tostring(seat)) end
+    end
+    local label=yours and 'Your seat' or occupied and 'Taken' or 'Available'
+    local style=yours and styles.selected or (occupied and styles.unavailable or plain)
+    if compact then
+      local x=seat%2==1 and 0.22 or 0.56
+      local y=seat<=2 and 0.28 or 0.37
+      set('cast'..seat,name,x,y,choose,style,0.28,0.077)
+      set('castStatus'..seat,label,x,y+0.041,nil,yours and styles.caption or styles.detail)
+    else
+      local y=0.34+(seat-1)*0.085
+      set('cast'..seat,name,0.56,y,choose,style,0.23,0.065)
+      set('castStatus'..seat,label,0.758,y+0.006,nil,yours and styles.caption or styles.detail)
+    end
+  end
+  local message
+  if s.phase==2 then message='Starting tournament...'
+  elseif s.guest and (s.id==0 or localIndex<1) then message='Connecting to host...'
+  elseif missing>0 then message='Waiting for '..missing..(missing==1 and ' guest to join' or ' guests to join')
+  elseif #waiting>0 then
+    local suffix=#waiting>1 and (' + '..(#waiting-1)..' more') or ''
+    message='Waiting for '..waiting[1]..suffix
+  end
+  set('readyCount',readyCount..' / '..(s.count+1)..' READY',0.22,compact and 0.75 or 0.685,nil,styles.caption)
+  if message then set('waiting',message,0.22,compact and 0.80 or 0.73,nil,styles.detail) end
+  if s.phase==1 and (not s.guest or (own and own>0)) then
+    local isReady=bit(s.ready,localIndex)
+    set('ready',isReady and 'Unready' or 'Ready',compact and 0.62 or 0.57,compact and 0.745 or 0.71,function() ready(s) end,
+      isReady and styles.selected or plain,0.23,0.07)
+  elseif s.phase==1 and s.guest and localIndex>=1 then
+    set('pickHint',compact and 'Pick a character first' or 'Choose a character to ready up',
+      compact and 0.62 or 0.57,compact and 0.75 or 0.73,nil,styles.detail)
+  end
+end
 local function draw(s)
   hide()
   if page=='closed' then
-    if canOpen() then set('entry','MULTIPLAYER',0.77,0.89,open) end
+    if canOpen() then
+      set('entry','MULTIPLAYER',layout.compact and 0.61 or 0.77,layout.compact and 0.82 or 0.89,open,
+        nil,layout.compact and 0.32 or 0.22,layout.compact and 0.09 or 0.055)
+    end
     return
   end
   set('panel',' ',0.16,0.1)
@@ -198,7 +316,7 @@ local function draw(s)
   AgentSetProperty(pool.panel,'Text Min Width',19)
   AgentSetProperty(pool.panel,'Text Min Height',13)
   AgentSetProperty(pool.panel,'Text Render Layer',28000)
-  set('title',page=='results' and 'TOURNAMENT RESULTS' or 'MULTIPLAYER',0.22,0.16)
+  set('title',page=='results' and 'TOURNAMENT RESULTS' or 'POKER NIGHT 2 MULTIPLAYER',0.22,0.16)
   if page=='results' then
     drawResults(s)
   elseif page=='home' then
@@ -236,28 +354,17 @@ local function draw(s)
         s.err==4 and 'A player did not finish joining. Return and try again.' or
         'Connection ended or was rejected. Return and try again.'
       set('error',message,0.25,0.35)
-    else
-      set('role',s.guest and 'Choose a character, then Ready' or 'Waiting for '..s.count..' guests',0.25,0.26)
-      set('hostrow','The Player — Host'..(bit(s.ready,0) and ' — READY' or ''),0.25,0.34)
-      for i=1,s.count do
-        set('row'..i,(s.seats[i]>0 and names[s.seats[i]] or 'Choosing character')..(bit(s.connected,i-1) and '' or ' — not connected')..(bit(s.ready,i) and ' — READY' or ''),0.25,0.34+i*0.055)
-      end
-      if s.guest and s.phase==1 then
-        set('prev','< Previous',0.25,0.64,function() selected=selected==1 and 4 or selected-1 end)
-        set('next','Next >',0.57,0.64,function() selected=selected==4 and 1 or selected+1 end)
-        set('claim','Pick '..names[selected],0.25,0.71,function() action('claim',tostring(selected)) end)
-      end
-      if s.phase==1 and (not s.guest or (s.peer>=2 and s.seats[s.peer-1]>0)) then
-        set('ready',bit(s.ready,s.guest and s.peer-1 or 0) and 'Unready' or 'Ready',0.57,0.71,function() ready(s) end)
-      elseif s.phase==2 then set('starting','Everyone ready. Starting match...',0.25,0.68) end
+    else drawJoinedLobby(s) end
+    if s.phase~=3 then
+      set('leave','Leave lobby',layout.compact and 0.62 or 0.25,layout.compact and 0.84 or 0.8,
+        function() if action('leave') then page='home' end end)
     end
-    if s.phase~=3 then set('leave','Leave lobby',0.25,0.8,function() if action('leave') then page='home' end end) end
     if s.err==6 then notice='That character is already taken.' end
   end
   if notice~='' then set('notice',notice,0.22,0.87) end
 end
 ThreadStart(function()
-  local previous,visibility,renderError='','',''
+  local previous,visibility,renderError,previousSize='','','',''
   while true do
     local s=status()
     if s.phase==5 and not starting then page='results'
@@ -269,6 +376,11 @@ ThreadStart(function()
     local frontMenu=InGameMenu_IsMenuActive() and InGameMenu_InMenuFromBoot()
     scene=SceneFind('ui_menuMain_overlay.scene') and 'ui_menuMain_overlay.scene'
     layout=scene and frontMenu and not starting and menuLayout() or nil
+    if layout then
+      local size=layout.clientWidth..'x'..layout.clientHeight..' render='..layout.renderWidth..'x'..layout.renderHeight..
+        ' compact='..tostring(layout.compact)
+      if size~=previousSize then trace('client='..size);previousSize=size end
+    end
     local view=tostring(not not scene)..':'..tostring(frontMenu)..':'..tostring(canOpen())..':'..tostring(not not layout)
     if view~=visibility then trace('visibility scene='..tostring(not not scene)..' boot_menu='..tostring(frontMenu)..' entry='..tostring(canOpen())..' layout='..tostring(not not layout)..' saved_game_flag='..tostring(Logic and Logic.bInGame));visibility=view end
     if layout and not starting then
@@ -282,7 +394,8 @@ ThreadStart(function()
           buttons={}
         elseif renderError~='' then trace('entry_render_recovered');renderError='' end
       else draw(s) end
-      local _,_,_,key=COOP_LobbyInput(page=='ip' and 'ip' or '')
+      local _,_,_,key,focused=COOP_LobbyInput(page=='ip' and 'ip' or '')
+      if page=='lobby' then drawHover(focused==1) end
       if key and key>0 and page=='ip' then
         if key==8 then address=address:sub(1,-2)
         elseif key==13 then if action('join',address) then page='lobby' end

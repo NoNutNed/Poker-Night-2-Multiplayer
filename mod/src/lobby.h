@@ -168,6 +168,14 @@ static int __cdecl lb_input(void *L) {
     HWND window=GetForegroundWindow();GetWindowThreadProcessId(window,&owner);
     int focused=owner==GetCurrentProcessId();
     const char *mode=p_lua_tolstring(L,1,NULL);
+    if(mode && !strcmp(mode,"size")) {
+        HWND game=focused ? window : (HWND)InterlockedCompareExchangePointer(&g_game_hwnd,NULL,NULL);
+        RECT rect={0};
+        BOOL valid=game && !IsIconic(game) && GetClientRect(game,&rect);
+        p_lua_pushinteger(L,valid ? rect.right-rect.left : 0);
+        p_lua_pushinteger(L,valid ? rect.bottom-rect.top : 0);
+        return 2;
+    }
     /* Event callbacks query focus without consuming the IP keyboard edges. */
     if(mode && !strcmp(mode,"focus")) {
         p_lua_pushinteger(L,-1);p_lua_pushinteger(L,-1);p_lua_pushinteger(L,0);p_lua_pushinteger(L,0);p_lua_pushinteger(L,focused);return 5;
