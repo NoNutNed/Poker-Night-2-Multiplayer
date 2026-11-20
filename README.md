@@ -1,4 +1,4 @@
-# Poker Night 2 Co-op
+# Poker Night 2 Multiplayer
 
 Play a Poker Night 2 tournament with friends. One player hosts, up to four friends take seats from the cast, and the game fills open seats with AI. Everyone stays at the table after elimination and sees the same final standings.
 
