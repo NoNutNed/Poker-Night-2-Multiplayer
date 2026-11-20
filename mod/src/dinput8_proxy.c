@@ -1001,6 +1001,7 @@ static char g_chore_queue[CHORE_Q_CAP][CHORE_NAME_MAX];
 static int g_chore_q_head = 0, g_chore_q_tail = 0;
 static volatile LONG g_net_started = 0;
 static SOCKET g_client_sock = INVALID_SOCKET;
+static PVOID volatile g_game_hwnd = NULL;
 
 // Optional role configuration lives next to the mod DLL.
 // (g_role_is_guest declared earlier so coop_seat_claimed can read it.)
@@ -2140,7 +2141,6 @@ static void patch_background_run(HMODULE exe) {
 // subclass the game window's wndproc to lie about focus state.
 
 static WNDPROC g_orig_wndproc = NULL;
-static HWND g_game_hwnd = NULL;
 
 static LRESULT CALLBACK coop_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -2170,7 +2170,7 @@ static DWORD WINAPI focus_patch_thread(LPVOID unused) {
         HWND h = NULL;
         EnumWindows(enum_find_pn2_window, (LPARAM)&h);
         if (h) {
-            g_game_hwnd = h;
+            InterlockedExchangePointer(&g_game_hwnd, h);
             g_orig_wndproc =
                 (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)coop_wndproc);
             coop_log("focus: subclassed PN2 window %p after %d tries, orig wndproc=%p",
