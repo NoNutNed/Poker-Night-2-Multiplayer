@@ -17,6 +17,7 @@ New-Item -ItemType Directory -Path $build -Force | Out-Null
 $chunks = [ordered]@{
     coop_session = 'COOP_SESSION_LUA'
     coop_lobby = 'COOP_LOBBY_LUA'
+    coop_display_mode = 'COOP_DISPLAY_MODE_LUA'
     coop_hand_ready = 'COOP_HAND_READY_LUA'
     coop_match_results = 'COOP_MATCH_RESULTS_LUA'
     coop_exchange = 'COOP_EXCHANGE_LUA'

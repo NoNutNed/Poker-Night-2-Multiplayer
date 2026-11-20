@@ -1002,6 +1002,7 @@ static int g_chore_q_head = 0, g_chore_q_tail = 0;
 static volatile LONG g_net_started = 0;
 static SOCKET g_client_sock = INVALID_SOCKET;
 static PVOID volatile g_game_hwnd = NULL;
+#include "display_mode.h"
 
 // Optional role configuration lives next to the mod DLL.
 // (g_role_is_guest declared earlier so coop_seat_claimed can read it.)
@@ -1641,6 +1642,11 @@ static int __cdecl coop_install_ai_hook(void *L) {
         p_lua_pushcclosure(L, coop_protect_preferences, 0);
         p_lua_rawset(L, LUA_GLOBALSINDEX);
         lb_register_lua(L);
+        p_lua_pushstring(L, "COOP_DisplayWindow");
+        p_lua_pushcclosure(L, coop_display_window, 0);
+        p_lua_rawset(L, LUA_GLOBALSINDEX);
+        p_lua_getfield(L,LUA_GLOBALSINDEX,"loadstring");p_lua_pushstring(L,COOP_DISPLAY_MODE_LUA);
+        if(p_lua_pcall(L,1,1,0)!=0 || p_lua_pcall(L,0,0,0)!=0)return 0;
         p_lua_getfield(L,LUA_GLOBALSINDEX,"loadstring");p_lua_pushstring(L,COOP_SESSION_LUA);
         if (p_lua_pcall(L,1,1,0)!=0 || p_lua_pcall(L,0,0,0)!=0) {
             coop_log("install: session error: %s", p_lua_tolstring(L, -1, NULL));
