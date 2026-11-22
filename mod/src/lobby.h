@@ -10,19 +10,28 @@ static int __cdecl lb_found(void *L);
 static void lb_state_locked(void);
 static int __cdecl coop_install_ai_hook(void *L);
 static unsigned lb_full(void){return (1u<<mp_count())-1;}
+static int lb_valid_roster(const unsigned *seats,unsigned cast,unsigned host_seat) {
+    if(!mp_seats_valid(seats))return 0;
+    if(!cast)return !host_seat;
+    return mp_count()>=1 && mp_count()<=3 && host_seat>=1 && host_seat<=4 &&
+        host_seat!=seats[0] && host_seat!=seats[1] && host_seat!=seats[2];
+}
 #include "hand_ready.h"
 #include "match_results.h"
 static void lb_changed_locked(void){++lb_revision;lb_ready=lb_lock_acks=0;lb_phase=1;lb_state_locked();}
 static void lb_state_locked(void) {
     char line[256];
-    _snprintf_s(line,sizeof(line),_TRUNCATE,"LSTATE id=%u rev=%u phase=%d guests=%d connected=%u ready=%u seat2=%u seat3=%u seat4=%u seat5=%u\n",
+    _snprintf_s(line,sizeof(line),_TRUNCATE,"LSTATE id=%u rev=%u phase=%d guests=%d connected=%u ready=%u seat2=%u seat3=%u seat4=%u seat5=%u",
         lb_nonce,lb_revision,lb_phase,mp_count(),lb_connected,lb_ready,lb_seats[0],lb_seats[1],lb_seats[2],lb_seats[3]);
+    size_t used=strlen(line);
+    if(lb_cast_only)sprintf_s(line+used,sizeof(line)-used," cast=%u\n",lb_host_seat);
+    else strcpy_s(line+used,sizeof(line)-used,"\n");
     mp_send_locked(-1,line);
 }
 static void lb_connected_locked(int slot){lb_connected|=1u<<slot;lb_seats[slot]=0;lb_changed_locked();}
 static void lb_disconnected_locked(int slot){lb_connected&=~(1u<<slot);lb_seats[slot]=0;lb_changed_locked();}
 static void lb_lock_locked(void) {
-    if(lb_phase!=1 || lb_connected!=lb_full() || lb_ready!=((lb_full()<<1)|1) || !mp_seats_valid(lb_seats))return;
+    if(lb_phase!=1 || lb_connected!=lb_full() || lb_ready!=((lb_full()<<1)|1) || !lb_valid_roster(lb_seats,lb_cast_only,lb_host_seat))return;
     for(int i=0;i<mp_count();++i)if(!mp_peers[i].hello)return;
     lb_phase=2;lb_lock_acks=0;lb_lock_started=GetTickCount64();lb_state_locked();
 }
@@ -38,7 +47,7 @@ static int lb_handle_line(const char *line) {
         unsigned slot=(unsigned)mp_source;
         if(sscanf(line,"LCLAIM id=%u rev=%u seat=%u%n",&id,&rev,&value,&end)==3 && end && !line[end] &&
            lb_phase==1 && id==lb_nonce && rev==lb_revision && value>=1 && value<=4 && mp_peers[slot].hello) {
-            int occupied=0;for(int i=0;i<mp_count();++i)if(i!=(int)slot && lb_seats[i]==value)occupied=1;
+            int occupied=lb_cast_only && lb_host_seat==value;for(int i=0;i<mp_count();++i)if(i!=(int)slot && lb_seats[i]==value)occupied=1;
             if(!occupied){if(lb_seats[slot]!=value){lb_seats[slot]=value;lb_changed_locked();}}
             else {char reject[96];_snprintf_s(reject,sizeof(reject),_TRUNCATE,"LREJECT id=%u rev=%u\n",lb_nonce,lb_revision);mp_send_locked(slot,reject);}
         } else if(sscanf(line,"LREADY id=%u rev=%u value=%u%n",&id,&rev,&value,&end)==3 && end && !line[end] &&
@@ -54,19 +63,26 @@ static int lb_handle_line(const char *line) {
         } else coop_log("lobby: rejected stale_or_wrong_phase peer=%u",slot+2);
     } else if(g_role_is_guest && mp_id>=2 && mp_id<=(unsigned)mp_count()+1) {
         if(sscanf(line,"LSTATE id=%u rev=%u phase=%u guests=%u connected=%u ready=%u seat2=%u seat3=%u seat4=%u seat5=%u%n",
-          &id,&rev,&phase,&count,&connected,&ready,&seats[0],&seats[1],&seats[2],&seats[3],&end)==10 && end && !line[end] &&
+          &id,&rev,&phase,&count,&connected,&ready,&seats[0],&seats[1],&seats[2],&seats[3],&end)==10 && end &&
           id && rev && (phase==1 || phase==2) && count==(unsigned)mp_count() && connected<=lb_full() && ready<=((lb_full()<<1)|1) &&
           (!lb_nonce || id==lb_nonce) && rev>=lb_revision && lb_phase<3) {
-            unsigned mask=0;int valid=1;
+            unsigned host_seat=0,cast=line[end]!=0;int cast_end=0;
+            if((cast && (PN2_LOBBY_PROTOCOL<22 || count<1 || count>3 ||
+                sscanf(line+end," cast=%u%n",&host_seat,&cast_end)!=1 || !cast_end ||
+                line[end+cast_end] || host_seat>4)) ||
+               (lb_nonce && cast!=lb_cast_only) ||
+               (cast && !host_seat && (ready&1))) {lb_error=3;goto done;}
+            unsigned mask=host_seat?1u<<host_seat:0;int valid=1;
             for(int i=0;i<MP_COUNT;++i){if(seats[i]>4 || (i>=mp_count() && seats[i]) || (seats[i] && !(connected&(1u<<i))) || (seats[i] && (mask&(1u<<seats[i]))))valid=0;if(seats[i])mask|=1u<<seats[i];}
             if(!valid){lb_error=3;goto done;}
+            lb_cast_only=cast;lb_host_seat=host_seat;
             lb_nonce=id;lb_revision=rev;lb_phase=(int)phase;lb_connected=connected;lb_ready=ready;memcpy(lb_seats,seats,sizeof(seats));lb_error=0;
-            if(phase==2 && connected==lb_full() && ready==((lb_full()<<1)|1) && mp_seats_valid(seats)) {
+            if(phase==2 && connected==lb_full() && ready==((lb_full()<<1)|1) && lb_valid_roster(seats,cast,host_seat)) {
                 g_requested_seat=sr_picker_choice=seats[mp_id-2];
                 char ack[96];_snprintf_s(ack,sizeof(ack),_TRUNCATE,"LACK id=%u rev=%u seat=%u\n",id,rev,g_requested_seat);exchange_send_locked(ack);
             }
         } else if(sscanf(line,"LBEGIN id=%u rev=%u%n",&id,&rev,&end)==2 && end && !line[end] && lb_phase==2 &&
-                  id==lb_nonce && rev==lb_revision && mp_seats_valid(lb_seats))lb_phase=3;
+                  id==lb_nonce && rev==lb_revision && lb_valid_roster(lb_seats,lb_cast_only,lb_host_seat))lb_phase=3;
         else if(sscanf(line,"LREJECT id=%u rev=%u%n",&id,&rev,&end)==2 && end && !line[end] && id==lb_nonce && rev==lb_revision)lb_error=6;
         else coop_log("lobby: ignored invalid_or_stale_state");
     }
@@ -126,10 +142,14 @@ static int __cdecl lb_action(void *L) {
     if((!strcmp(action,"host") || !strcmp(action,"join")) && !lb_worker_running && lb_phase==0) {
         int host=!strcmp(action,"host");
         char ip[64];unsigned port=0;
-        if((host && arg && arg[0]>='1' && arg[0]<='4' && !arg[1]) || (!host && lb_target(arg,ip,&port))) {
+        int cast=host && PN2_LOBBY_PROTOCOL>=22 && arg && !strncmp(arg,"cast",4) &&
+            arg[4]>='1' && arg[4]<='3' && !arg[5];
+        if(cast || (host && arg && arg[0]>='1' && arg[0]<='4' && !arg[1]) || (!host && lb_target(arg,ip,&port))) {
             exchange_disconnected_locked();g_client_sock=INVALID_SOCKET;
             memset(mp_peers,0,sizeof(mp_peers));for(int i=0;i<MP_COUNT;++i)mp_peers[i].socket=INVALID_SOCKET;
-            g_role_is_guest=!host;if(host)g_guest_count=arg[0]-'0';else {strcpy_s(g_host_ip,sizeof(g_host_ip),ip);g_host_port=(int)port;}
+            g_role_is_guest=!host;lb_cast_only=cast;lb_host_seat=0;
+            if(host)g_guest_count=arg[cast?4:0]-'0';else {strcpy_s(g_host_ip,sizeof(g_host_ip),ip);g_host_port=(int)port;}
+            coop_log("lobby: role_selected=%s",host?"host":"guest");
             g_two_guests=g_test_mode=g_seat_probe=g_seat_control=g_seat_picker=g_presentation_sync=g_voice_sync=1;
             lb_phase=1;lb_error=0;lb_nonce=host?(unsigned)(GetTickCount64()%0x7ffffffe)+1:0;lb_revision=1;lb_connected=lb_ready=lb_lock_acks=0;memset(lb_seats,0,sizeof(lb_seats));
             hand_ready_hand=hand_ready_votes=0;
@@ -140,9 +160,15 @@ static int __cdecl lb_action(void *L) {
         }
     } else if(lb_phase==1 && !strcmp(action,"claim") && g_role_is_guest && arg && arg[0]>='1' && arg[0]<='4' && !arg[1] && lb_nonce) {
         char line[96];_snprintf_s(line,sizeof(line),_TRUNCATE,"LCLAIM id=%u rev=%u seat=%c\n",lb_nonce,lb_revision,arg[0]);ok=exchange_send_locked(line);
+    } else if(lb_phase==1 && !strcmp(action,"claim") && !g_role_is_guest && lb_cast_only && arg && arg[0]>='1' && arg[0]<='4' && !arg[1]) {
+        unsigned seat=arg[0]-'0';
+        if(seat!=lb_seats[0] && seat!=lb_seats[1] && seat!=lb_seats[2]) {
+            if(lb_host_seat!=seat){lb_host_seat=seat;lb_changed_locked();}
+            ok=1;
+        }
     } else if(lb_phase==1 && !strcmp(action,"ready") && arg && (arg[0]=='0' || arg[0]=='1') && !arg[1]) {
         if(g_role_is_guest){if(lb_nonce && mp_id>=2 && lb_seats[mp_id-2]){char line[96];_snprintf_s(line,sizeof(line),_TRUNCATE,"LREADY id=%u rev=%u value=%c\n",lb_nonce,lb_revision,arg[0]);ok=exchange_send_locked(line);}}
-        else{if(arg[0]=='1')lb_ready|=1;else lb_ready&=~1u;lb_state_locked();lb_lock_locked();ok=1;}
+        else if(!lb_cast_only || lb_host_seat){if(arg[0]=='1')lb_ready|=1;else lb_ready&=~1u;lb_state_locked();lb_lock_locked();ok=1;}
     } else if(!strcmp(action,"leave") && lb_phase!=3 && lb_phase!=5) {
         lb_phase=0;lb_error=0;
         if(lb_listener!=INVALID_SOCKET){closesocket(lb_listener);lb_listener=INVALID_SOCKET;}
@@ -155,13 +181,49 @@ static int __cdecl lb_action(void *L) {
 static int __cdecl lb_status(void *L) {
     EnterCriticalSection(&g_net_lock);
     int values[]={g_lobby_mode,lb_phase,g_role_is_guest,(int)mp_id,(int)lb_nonce,(int)lb_revision,mp_count(),(int)lb_connected,(int)lb_ready,
-        (int)lb_seats[0],(int)lb_seats[1],(int)lb_seats[2],(int)lb_seats[3],lb_error};
-    LeaveCriticalSection(&g_net_lock);for(int i=0;i<14;++i)p_lua_pushinteger(L,values[i]);return 14;
+        (int)lb_seats[0],(int)lb_seats[1],(int)lb_seats[2],(int)lb_seats[3],lb_error,(int)lb_cast_only,(int)lb_host_seat};
+    LeaveCriticalSection(&g_net_lock);for(size_t i=0;i<ARRAYSIZE(values);++i)p_lua_pushinteger(L,values[i]);return ARRAYSIZE(values);
+}
+static int __cdecl lb_emote_catalog(void *L) {
+    const char *value=p_lua_tolstring(L,1,NULL);
+    unsigned index=0;int end=0;
+    if(!value || sscanf(value,"%u%n",&index,&end)!=1 || value[end] || index>=ARRAYSIZE(COOP_EMOTE_CATALOG)-1) return 0;
+    p_lua_pushstring(L,COOP_EMOTE_CATALOG[index]);return 1;
+}
+static int __cdecl lb_emote_input(void *L) {
+    static unsigned held=0;
+    static uint64_t chars_held=0;
+    const int keys[]={VK_INSERT,VK_ESCAPE,VK_LEFT,VK_RIGHT,VK_UP,VK_DOWN,VK_PRIOR,VK_NEXT,VK_RETURN,VK_TAB,'S',VK_HOME,VK_END,VK_OEM_2};
+    const char *mode=p_lua_tolstring(L,1,NULL);
+    int searching=mode && !strcmp(mode,"search");
+    DWORD owner=0;
+    GetWindowThreadProcessId(GetForegroundWindow(),&owner);
+    unsigned state=0;
+    for (unsigned i=0;i<ARRAYSIZE(keys);++i) if(GetAsyncKeyState(keys[i])&0x8000) state|=1u<<i;
+    unsigned pressed=owner==GetCurrentProcessId()?state&~held:0;
+    held=state;
+    unsigned key=0;
+    for(unsigned i=0;i<ARRAYSIZE(keys);++i) if(pressed&(1u<<i)){key=i+1;break;}
+    if (searching && owner==GetCurrentProcessId()) {
+        uint64_t chars=0;
+        const char alphabet[]="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ";
+        for(unsigned i=0;i<sizeof(alphabet)-1;++i) if(GetAsyncKeyState(alphabet[i])&0x8000) chars|=UINT64_C(1)<<i;
+        if(GetAsyncKeyState(VK_BACK)&0x8000) chars|=UINT64_C(1)<<37;
+        uint64_t edges=chars&~chars_held;
+        chars_held=chars;
+        if(key!=1 && key!=2 && key!=9) {
+            key=0;
+            for(unsigned i=0;i<38;++i) if(edges&(UINT64_C(1)<<i)){key=i==37?108:100+alphabet[i];break;}
+        }
+    } else chars_held=0;
+    p_lua_pushinteger(L,key);p_lua_pushinteger(L,owner==GetCurrentProcessId());return 2;
 }
 static void lb_register_lua(void *L) {
     const char *names[]={"COOP_LobbyAction","COOP_LobbyStatus","COOP_LobbyInstall","COOP_LobbyInput","COOP_LobbyScan","COOP_LobbyFound","COOP_HandReadyAction","COOP_HandReadyStatus","COOP_MatchAction","COOP_MatchStatus"};
     PFN_lua_CFunction funcs[]={lb_action,lb_status,coop_install_ai_hook,lb_input,lb_scan,lb_found,hand_ready_action,hand_ready_status,mr_action,mr_status};
     for(size_t i=0;i<sizeof(names)/sizeof(names[0]);++i){p_lua_pushstring(L,names[i]);p_lua_pushcclosure(L,funcs[i],0);p_lua_rawset(L,LUA_GLOBALSINDEX);}
+    p_lua_pushstring(L,"COOP_EmoteCatalog");p_lua_pushcclosure(L,lb_emote_catalog,0);p_lua_rawset(L,LUA_GLOBALSINDEX);
+    p_lua_pushstring(L,"COOP_EmoteInput");p_lua_pushcclosure(L,lb_emote_input,0);p_lua_rawset(L,LUA_GLOBALSINDEX);
 }
 static int __cdecl lb_input(void *L) {
     static int mouse,held[256];int x=-1,y=-1,click=0,key=0;DWORD owner=0;

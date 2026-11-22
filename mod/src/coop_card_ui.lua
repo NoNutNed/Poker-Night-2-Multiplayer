@@ -3,7 +3,8 @@
 if not (COOP_TestMode and COOP_TestMode()) or COOP_CardUIInstalled or
    not COOP_ControlOptions or COOP_ControlOptions()~=1 then return end
 assert(COOP_ControlInstalled and COOP_ControlLocalPlayer,'controls must install first')
-if not (COOP_IsGuest and COOP_IsGuest()) then COOP_CardUIInstalled=true;return end
+if not (COOP_IsGuest and COOP_IsGuest()) and
+   not (COOP_LobbyStatus and select(15,COOP_LobbyStatus())==1) then COOP_CardUIInstalled=true;return end
 assert(Player and type(Player.AddHoleCard)=='function' and CardRenderer_Render,'card renderer not loaded')
 assert(AIPlayer and AIPlayer.Fold and AIPlayer.ShowHandUI and AIPlayer.HideHandUI and
        HumanPlayer and type(HumanPlayer.EvaluateAndAct)=='function' and HumanPlayer.Fold and HumanPlayer.RunCardCallout and HumanPlayer.RunCardCalloutClose,

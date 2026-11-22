@@ -134,7 +134,10 @@ static int exchange_handle_line(const char *line) {
         if (!g_role_is_guest || !x_active || x_fault) {
             coop_log("exchange: ignored_event inactive");
         } else if (fields != 7 || !end || line[end] || !item.epoch || item.epoch > 0x7fffffff ||
-                   !item.seq || item.seq > 0x7fffffff || item.kind < 1 || item.kind > (g_voice_sync?11u:10u) ||
+                   !item.seq || item.seq > 0x7fffffff || item.kind < 1 ||
+                   (item.kind<12 && item.kind > (g_voice_sync?11u:10u)) || item.kind>13 ||
+                   (item.kind==12 && !(g_lobby_mode && PN2_LOBBY_PROTOCOL>=18)) ||
+                   (item.kind==13 && !(g_lobby_mode && PN2_LOBBY_PROTOCOL>=19)) ||
                    !exchange_token(item.dlg, X_DLG) || !exchange_token(item.node, X_NODE) ||
                    !exchange_token(item.chore, X_CHORE) || !exchange_token(item.key, X_KEY)) {
             exchange_fault_locked("malformed_event");
@@ -213,7 +216,9 @@ static int __cdecl exchange_emit(void *L) {
                    kind && !strcmp(kind, "reveal") ? 7 :
                    kind && !strcmp(kind, "bust_chore") ? 8 : kind && !strcmp(kind, "bust_state") ? 9 :
                    kind && !strcmp(kind, "bust_done") ? 10 :
-                   g_voice_sync && kind && !strcmp(kind,"voice_begin") ? 11 : 0;
+                   g_voice_sync && kind && !strcmp(kind,"voice_begin") ? 11 :
+                   g_lobby_mode && PN2_LOBBY_PROTOCOL>=18 && kind && !strcmp(kind,"tell") ? 12 :
+                   g_lobby_mode && PN2_LOBBY_PROTOCOL>=19 && kind && !strcmp(kind,"emote") ? 13 : 0;
     int sent = 0;
     EnterCriticalSection(&g_net_lock);
     if (g_test_mode && !g_role_is_guest && x_active && !x_fault) {

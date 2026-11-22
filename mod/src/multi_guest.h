@@ -25,6 +25,7 @@ static void mp_clear_locked(int connection) {
 }
 static int mp_scope_locked(unsigned epoch,unsigned revision,unsigned seat) {
     if(!seat_control_enabled_locked() || epoch!=x_epoch || revision!=3 || seat<1 || seat>4)return 0;
+    if(g_lobby_mode && lb_cast_only && seat==lb_host_seat)return 1;
     for(int i=0;i<mp_count();++i)if(mp_seats[i]==seat)return 1;
     return 0;
 }

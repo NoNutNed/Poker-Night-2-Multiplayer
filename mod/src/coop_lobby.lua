@@ -14,6 +14,7 @@ local pool,scene={},nil
 local layout=nil
 local nativeDialog,pendingClick,consumeRelease=false,nil,false
 local count,address=2,'127.0.0.1'
+local castOnly,castCount=false,3
 local notice=''
 local function trace(message) if type(Print)=='function' then Print('COOP_LOBBY '..message) end end
 local names={'Brock','Claptrap','Ash','Sam'}
@@ -34,8 +35,9 @@ local function canOpen()
     (not kMenuPage_MainMenu or InGameMenu_GetCurrentPage()==kMenuPage_MainMenu) and not Credits_AreRunning()
 end
 local function status()
-  local mode,phase,guest,peer,id,rev,guests,connected,ready,s2,s3,s4,s5,err=COOP_LobbyStatus()
-  return {mode=mode,phase=phase,guest=guest==1,peer=peer,id=id,rev=rev,count=guests,connected=connected,ready=ready,seats={s2,s3,s4,s5},err=err}
+  local mode,phase,guest,peer,id,rev,guests,connected,ready,s2,s3,s4,s5,err,cast,hostSeat=COOP_LobbyStatus()
+  return {mode=mode,phase=phase,guest=guest==1,peer=peer,id=id,rev=rev,count=guests,connected=connected,ready=ready,
+    seats={[0]=cast==1 and hostSeat or 5,s2,s3,s4,s5},err=err,cast=cast==1}
 end
 local function bit(mask,index) return math.floor(mask/2^index)%2==1 end
 local function menuLayout()
@@ -174,7 +176,7 @@ local function beginMatch()
     if status().phase~=3 then starting=false;page='lobby';notice='Connection ended before match startup.';return end
     Yield()
   end
-  COOP_SessionBegin()
+  COOP_SessionBegin(status().cast)
   -- Use the actual shipped front-end start path, including its transitions,
   -- menu transition. The clean session suppresses campaign reload and the
   -- cinematic through the original initialized skip-opening branch.
@@ -212,7 +214,7 @@ end
 local function drawResults(s)
   local rematch,lobby,p1,p2,p3,p4,p5=COOP_MatchStatus()
   local place={p1,p2,p3,p4,p5}
-  local human={[5]=true}
+  local human={[s.seats[0]]=true}
   local rematches,returns=0,0
   for i=0,s.count do
     if i>0 and s.seats[i]>0 then human[s.seats[i]]=true end
@@ -240,24 +242,25 @@ local function drawResults(s)
 end
 local function drawJoinedLobby(s)
   local localIndex=s.guest and s.peer-1 or 0
-  local own=s.guest and s.seats[localIndex] or nil
+  local own=s.seats[localIndex] or 0
+  local canChoose=s.guest and s.id~=0 and localIndex>=1 or not s.guest and s.cast
   local taken,waiting={},{}
   local readyCount,missing=0,0
   local compact=layout.compact
   set('tableHeading','AT THE TABLE',0.22,compact and 0.47 or 0.284,nil,styles.caption)
-  set('castHeading',s.guest and 'CHOOSE A CHARACTER' or 'CAST SEATS',compact and 0.22 or 0.56,
+  set('castHeading',canChoose and 'CHOOSE A CHARACTER' or 'CAST SEATS',compact and 0.22 or 0.56,
     compact and 0.238 or 0.284,nil,styles.caption)
   for i=0,s.count do
     local seat=s.seats[i] or 0
     local joined=i==0 or bit(s.connected,i-1)
     local isReady=joined and bit(s.ready,i)
-    local name=i==0 and 'The Player' or names[seat] or ('Guest '..i)
-    if i>0 and joined and seat>0 then taken[seat]=true end
+    local name=seat==5 and 'The Player' or names[seat] or (i==0 and 'Host' or 'Guest '..i)
+    if joined and seat>0 then taken[seat]=true end
     if isReady then readyCount=readyCount+1
     elseif joined then waiting[#waiting+1]=i==localIndex and 'you' or (i==0 and 'Host' or name)
     else missing=missing+1 end
-    local label=not joined and 'Open' or isReady and 'Ready' or (i>0 and seat==0 and 'Choosing' or 'Not ready')
-    local suffix=i==0 and ' (Host)' or (i==localIndex and ' (You)' or '')
+    local label=not joined and 'Open' or isReady and 'Ready' or (seat==0 and 'Choosing' or 'Not ready')
+    local suffix=i==0 and (seat>0 and ' (Host)' or '') or (i==localIndex and ' (You)' or '')
     local y=(compact and 0.506 or 0.34)+i*(compact and 0.044 or 0.062)
     set(i==0 and 'hostrow' or 'row'..i,name..suffix,0.22,y,nil,joined and plain or styles.unavailable)
     set('rowStatus'..i,label,compact and 0.635 or 0.449,y+0.006,nil,isReady and styles.caption or styles.detail)
@@ -266,7 +269,7 @@ local function drawJoinedLobby(s)
     local yours=seat==own
     local occupied=taken[seat]
     local choose
-    if s.guest and s.id~=0 and localIndex>=1 and s.phase==1 and not occupied and not yours then
+    if canChoose and s.phase==1 and not occupied and not yours then
       choose=function() action('claim',tostring(seat)) end
     end
     local label=yours and 'Your seat' or occupied and 'Taken' or 'Available'
@@ -292,11 +295,11 @@ local function drawJoinedLobby(s)
   end
   set('readyCount',readyCount..' / '..(s.count+1)..' READY',0.22,compact and 0.75 or 0.685,nil,styles.caption)
   if message then set('waiting',message,0.22,compact and 0.80 or 0.73,nil,styles.detail) end
-  if s.phase==1 and (not s.guest or (own and own>0)) then
+  if s.phase==1 and own>0 then
     local isReady=bit(s.ready,localIndex)
     set('ready',isReady and 'Unready' or 'Ready',compact and 0.62 or 0.57,compact and 0.745 or 0.71,function() ready(s) end,
       isReady and styles.selected or plain,0.23,0.07)
-  elseif s.phase==1 and s.guest and localIndex>=1 then
+  elseif s.phase==1 and canChoose then
     set('pickHint',compact and 'Pick a character first' or 'Choose a character to ready up',
       compact and 0.62 or 0.57,compact and 0.75 or 0.73,nil,styles.detail)
   end
@@ -316,7 +319,8 @@ local function draw(s)
   AgentSetProperty(pool.panel,'Text Min Width',19)
   AgentSetProperty(pool.panel,'Text Min Height',13)
   AgentSetProperty(pool.panel,'Text Render Layer',28000)
-  set('title',page=='results' and 'TOURNAMENT RESULTS' or 'POKER NIGHT 2 MULTIPLAYER',0.22,0.16)
+  set('title',page=='results' and 'TOURNAMENT RESULTS' or
+    (page=='lobby' and s.cast and 'FOUR-PLAYER CAST' or 'POKER NIGHT 2 MULTIPLAYER'),0.22,0.16)
   if page=='results' then
     drawResults(s)
   elseif page=='home' then
@@ -324,10 +328,18 @@ local function draw(s)
     set('join','Find a lobby',0.25,0.45,function() COOP_LobbyScan();page='browse' end)
     set('back','Back',0.25,0.73,close)
   elseif page=='host' then
-    set('capacity','Hold\'em / standard table / '..count..' guests',0.25,0.32)
-    set('less','Fewer guests',0.25,0.43,function() count=math.max(1,count-1) end)
-    set('more','More guests',0.57,0.43,function() count=math.min(4,count+1) end)
-    set('create','Create lobby',0.25,0.59,function() if action('host',tostring(count)) then page='lobby' end end)
+    local guests=castOnly and castCount or count
+    local capacity=guests..(guests==1 and ' guest' or ' guests')
+    if castOnly then capacity=capacity..' / '..(3-guests)..' AI' end
+    set('capacity',"Hold'em / "..(castOnly and 'four cast seats' or 'standard table')..' / '..capacity,0.25,0.32)
+    set('less','Fewer guests',0.25,0.43,function()
+      if castOnly then castCount=math.max(1,castCount-1) else count=math.max(1,count-1) end
+    end)
+    set('more','More guests',0.57,0.43,function()
+      if castOnly then castCount=math.min(3,castCount+1) else count=math.min(4,count+1) end
+    end)
+    set('format',castOnly and 'Switch to Standard' or 'Switch to Four-Player Cast',0.25,0.51,function() castOnly=not castOnly end,nil,0.45)
+    set('create','Create lobby',0.25,0.59,function() if action('host',castOnly and ('cast'..castCount) or tostring(count)) then page='lobby' end end)
     set('back','Back',0.25,0.73,function() page='home' end)
   elseif page=='browse' then
     local found=0

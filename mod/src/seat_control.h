@@ -3,8 +3,10 @@
 #define SC_CAP 32
 typedef struct { unsigned epoch, revision, seat, hand, street, turn, kind, action, amount; } SeatControlEvent;
 static SeatControlEvent sc_queue[SC_CAP];
+static SeatControlEvent sc_emote[MP_COUNT];
 static unsigned sc_head, sc_tail;
-static void seat_control_reset_locked(void) { sc_head=sc_tail=0; }
+static void seat_control_reset_locked(void) { sc_head=sc_tail=0;memset(sc_emote,0,sizeof(sc_emote)); }
+static int seat_guest_intent(unsigned kind) { return kind==2 || kind==5; }
 static int seat_control_enabled_locked(void) {
     if (g_two_guests) return g_test_mode && g_seat_probe && g_seat_control &&
         sr_confirmed && mp_epoch==x_epoch && sr_revision==3 && x_active && !x_fault;
@@ -17,8 +19,10 @@ static int seat_control_parse(const char *line, SeatControlEvent *e) {
     return seat_reservation_numbers_valid(line) &&
         sscanf(line,"CSEAT epoch=%u rev=%u seat=%u hand=%u street=%u turn=%u kind=%u action=%u amount=%u%n",
         &e->epoch,&e->revision,&e->seat,&e->hand,&e->street,&e->turn,&e->kind,&e->action,&e->amount,&end)==9 &&
-        end && !line[end] && e->epoch && e->hand && e->turn && e->street>=1 && e->street<=4 &&
-        e->kind>=1 && e->kind<=4 && e->action<=4;
+        end && !line[end] && e->epoch && e->hand &&
+        ((e->kind>=1 && e->kind<=4 && e->turn && e->street>=1 && e->street<=4 && e->action<=4) ||
+         (g_lobby_mode && PN2_LOBBY_PROTOCOL>=20 && e->kind==5 && !e->turn && !e->street &&
+          e->action>=1 && e->action<=3 && e->amount>=1 && e->amount<=4096));
 }
 static int seat_control_scope_locked(const SeatControlEvent *e) {
     if (g_two_guests) return mp_scope_locked(e->epoch,e->revision,e->seat);
@@ -30,9 +34,11 @@ static int seat_control_handle_line(const char *line) {
     SeatControlEvent e;
     EnterCriticalSection(&g_net_lock);
     if (!seat_control_parse(line,&e) || !seat_control_scope_locked(&e) ||
-        (g_role_is_guest ? e.kind==2 : e.kind!=2) ||
+        (g_role_is_guest ? seat_guest_intent(e.kind) : !seat_guest_intent(e.kind)) ||
         (g_two_guests && !g_role_is_guest && (mp_source<0 || mp_source>=mp_count() || mp_seats[mp_source]!=e.seat))) {
         coop_log("control: reject invalid_direction_or_scope");
+    } else if (e.kind==5) {
+        if (mp_source>=0 && mp_source<mp_count() && !sc_emote[mp_source].kind) sc_emote[mp_source]=e;
     } else if ((sc_tail+1)%SC_CAP==sc_head) exchange_fault_locked("control_queue_overflow");
     else {
         sc_queue[sc_tail]=e; sc_tail=(sc_tail+1)%SC_CAP;
@@ -55,7 +61,7 @@ static int __cdecl seat_control_send(void *L) {
     const char *line=p_lua_tolstring(L,1,NULL); SeatControlEvent e; int sent=0;
     EnterCriticalSection(&g_net_lock);
     if (line && seat_control_parse(line,&e) && seat_control_scope_locked(&e) &&
-        (g_role_is_guest ? e.kind==2 && (!g_two_guests || e.seat==sr_reserved) : e.kind!=2)) {
+        (g_role_is_guest ? seat_guest_intent(e.kind) && (!g_two_guests || e.seat==sr_reserved) : !seat_guest_intent(e.kind))) {
         char wire[192]; _snprintf_s(wire,sizeof(wire),_TRUNCATE,"%s\n",line);
         sent=exchange_send_locked(wire);
     }
@@ -65,12 +71,26 @@ static int __cdecl seat_control_send(void *L) {
 static int __cdecl seat_control_take(void *L) {
     SeatControlEvent e; int found=0;
     EnterCriticalSection(&g_net_lock);
-    if (seat_control_enabled_locked() && sc_head!=sc_tail) {e=sc_queue[sc_head];sc_head=(sc_head+1)%SC_CAP;found=1;}
+    if (seat_control_enabled_locked()) {
+        if (sc_head!=sc_tail) {e=sc_queue[sc_head];sc_head=(sc_head+1)%SC_CAP;found=1;}
+    }
     LeaveCriticalSection(&g_net_lock);
     if (!found) return 0;
     p_lua_pushinteger(L,e.kind);p_lua_pushinteger(L,e.epoch);p_lua_pushinteger(L,e.revision);
     p_lua_pushinteger(L,e.seat);p_lua_pushinteger(L,e.hand);p_lua_pushinteger(L,e.street);
     p_lua_pushinteger(L,e.turn);p_lua_pushinteger(L,e.action);p_lua_pushinteger(L,e.amount);return 9;
+}
+static int __cdecl seat_emote_take(void *L) {
+    SeatControlEvent e;int found=0;
+    EnterCriticalSection(&g_net_lock);
+    if (seat_control_enabled_locked() && !g_role_is_guest) for (int i=0;i<mp_count();++i) {
+        if (!sc_emote[i].kind) continue;
+        e=sc_emote[i];sc_emote[i].kind=0;found=seat_control_scope_locked(&e);break;
+    }
+    LeaveCriticalSection(&g_net_lock);
+    if (!found) return 0;
+    p_lua_pushinteger(L,e.seat);p_lua_pushinteger(L,e.hand);
+    p_lua_pushinteger(L,e.action);p_lua_pushinteger(L,e.amount);return 4;
 }
 static int __cdecl seat_picker_options(void *L) {
     EnterCriticalSection(&g_net_lock);
@@ -96,7 +116,7 @@ static int __cdecl seat_picker_choose(void *L) {
     p_lua_pushinteger(L,accepted);return 1;
 }
 static void seat_control_register_lua(void *L) {
-    const char *names[]={"COOP_ControlOptions","COOP_ControlSend","COOP_ControlTake","COOP_SeatPickerOptions","COOP_SeatPickerChoose","COOP_MultiOptions"};
-    PFN_lua_CFunction funcs[]={seat_control_options,seat_control_send,seat_control_take,seat_picker_options,seat_picker_choose,mp_options};
-    for(int i=0;i<6;++i) {p_lua_pushstring(L,names[i]);p_lua_pushcclosure(L,funcs[i],0);p_lua_rawset(L,LUA_GLOBALSINDEX);}
+    const char *names[]={"COOP_ControlOptions","COOP_ControlSend","COOP_ControlTake","COOP_SeatPickerOptions","COOP_SeatPickerChoose","COOP_MultiOptions","COOP_EmoteTake"};
+    PFN_lua_CFunction funcs[]={seat_control_options,seat_control_send,seat_control_take,seat_picker_options,seat_picker_choose,mp_options,seat_emote_take};
+    for(size_t i=0;i<ARRAYSIZE(names);++i) {p_lua_pushstring(L,names[i]);p_lua_pushcclosure(L,funcs[i],0);p_lua_rawset(L,LUA_GLOBALSINDEX);}
 }

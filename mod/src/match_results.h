@@ -12,8 +12,10 @@ static void mr_clear_locked(void) {
 
 static int mr_valid_places(const unsigned places[5]) {
     unsigned counts[6] = {0};
-    for (int i = 0; i < 5; ++i) {
-        if (places[i] < 1 || places[i] > 5) return 0;
+    unsigned seat_count=lb_cast_only?4:5;
+    if(lb_cast_only && places[4])return 0;
+    for (unsigned i = 0; i < seat_count; ++i) {
+        if (places[i] < 1 || places[i] > seat_count) return 0;
         ++counts[places[i]];
     }
     if (counts[1] != 1) return 0;
@@ -62,6 +64,7 @@ static void mr_enter_lobby_locked(unsigned choice) {
     lb_ready = lb_lock_acks = lb_error = 0;
     if (choice == 2) {
         memset(lb_seats, 0, sizeof(lb_seats));
+        lb_host_seat=0;
         for (int i = 0; i < mp_count(); ++i) mp_peers[i].session_seat = 0;
         sr_picker_choice = 0;
     }

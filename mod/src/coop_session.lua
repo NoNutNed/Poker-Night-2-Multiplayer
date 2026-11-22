@@ -14,7 +14,7 @@ for _,name in ipairs({'TableBets_Activate','TableBets_Open','TableBets_ClearAll'
  'InGameMenu_BountyUnlock','InGameMenu_BountyAwardNotify'}) do
   assert(type(_G[name])=='function','session dependency unavailable: '..name)
 end
-local active=false
+local active,castOnly=false,false
 local savedPrefs,savedPersistent,prefs,persistent,watchedTable
 local pendingSave=false
 local protectPreferences=COOP_ProtectPreferences
@@ -86,12 +86,13 @@ local function hideChallenges()
   for _,name in ipairs({'ui_xbox_button_RT','ui_xbox_button_RT_alt'}) do if AgentExists(name) then AgentHide(name,true) end end
 end
 function COOP_SessionActive() return active end
-function COOP_SessionBegin()
+function COOP_CastOnly() return active and castOnly end
+function COOP_SessionBegin(cast)
   if active then return end
   prefs=GetPreferences();persistent=AgentFind('logic_persistent').mProps
   savedPrefs=snapshot(prefs,userSetting);savedPersistent=snapshot(persistent)
   protectPreferences('1')
-  active=true;pendingSave=false
+  active=true;castOnly=cast==true;pendingSave=false
   prefs['Episode - Save Is Valid']=false
   prefs['Showed Popup - Tutorial']=true
   prefs['Episode - Chance of Unlock']=0
@@ -120,7 +121,7 @@ local function endSession(shuttingDown)
   -- The native exit destroys the scene and serializes only preferences.
   if not shuttingDown and not restorePhase('persistent',restorePersistent) then return false end
   protectPreferences('0')
-  active=false;savedPrefs=nil;savedPersistent=nil
+  active=false;castOnly=false;savedPrefs=nil;savedPersistent=nil
   prefs=nil;persistent=nil;watchedTable=nil
   trace('end campaign_profile_restored')
   local flush=pendingSave and not shuttingDown
@@ -183,8 +184,47 @@ GameTable.InitializeAgents=function(self,...)
   end
   -- Original code may Yield. Never wrap it in pcall in PN2's Lua 5.1 VM.
   local result=initializeAgents(self,...)
+  if COOP_CastOnly() then
+    for seat=1,5 do
+      local player=self.players[seat]
+      local stack=seat==5 and 0 or 25000
+      player:SetChips(stack)
+      player.previousChips=stack
+      player.last5HandChipcount={stack,stack,stack,stack,stack}
+    end
+    local inactive=self.players[5]
+    inactive.folded=true
+    inactive.isInThisHand=false
+    Logic.bBustedPlayer=true
+    Logic.iNumNonBustedPlayers=4
+    self:UpdateChipUI(true)
+    trace('four_player_cast stacks=25000,25000,25000,25000,0')
+  end
   if active then self.disableSaves=true;neutral();hideChallenges();trace('table_initialized intro=short_authored bounties=off') end
   return result
+end
+local chipUI,roundOrder=GameTable.UpdateChipUI,GameTable.SetRoundOrder
+GameTable.UpdateChipUI=function(self,...)
+  local result=chipUI(self,...)
+  if COOP_CastOnly() then
+    for _,name in ipairs({'txt_status_Player','txt_chipcount_Player'}) do
+      if AgentExists(name) then AgentHide(name,true) end
+    end
+  end
+  return result
+end
+GameTable.SetRoundOrder=function(self,state,...)
+  if not COOP_CastOnly() then return roundOrder(self,state,...) end
+  local seats=self:GetNonBustedPlayers()
+  local dealer=self:GetDealer()
+  local index=1
+  for i,player in ipairs(seats) do if player==dealer then index=i;break end end
+  local offset=state.name=='ModePreFlop' and (#seats==2 and 0 or 3) or 1
+  self.playerRoundOrder={}
+  for i=0,#seats-1 do
+    local player=seats[(index-1+offset+i)%#seats+1]
+    if not player:IsFolded() then self.playerRoundOrder[#self.playerRoundOrder+1]=player end
+  end
 end
 local tableSave=GameTable.SaveGame
 GameTable.SaveGame=function(self,...) if not active then return tableSave(self,...) end end
