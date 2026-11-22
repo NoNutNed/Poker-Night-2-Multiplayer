@@ -6,10 +6,17 @@ assert(type(GameTable.InitRound)=='function' and type(AIPlayer.EvaluateAndAct)==
        type(HumanPlayer.EvaluateAndAct)=='function', 'control methods unavailable')
 local guest=COOP_IsGuest and COOP_IsGuest()
 local multi=COOP_MultiOptions and COOP_MultiOptions()==1
+local cast,hostCastSeat
+if COOP_LobbyStatus then cast,hostCastSeat=select(15,COOP_LobbyStatus()) end
+cast=cast==1
 local function multiRoster()
   local _,localSeat,epoch,revision,s2,s3,active,held,rejected,s4,s5=COOP_MultiOptions()
   local seats={}
   for _,seat in ipairs({s2 or 0,s3 or 0,s4 or 0,s5 or 0}) do if seat>0 then seats[#seats+1]=seat end end
+  if cast then
+    seats[#seats+1]=hostCastSeat
+    if not guest then localSeat=hostCastSeat end
+  end
   return localSeat,epoch,revision,seats,active
 end
 if guest and COOP_SeatPickerOptions and COOP_SeatPickerOptions()==1 then
@@ -40,7 +47,16 @@ COOP_HumanOwns=function(player)
     (multi and context.owned[player.index] or player.index==context.seat)
 end
 COOP_ControlLocalPlayer=function(game)
-  if guest and context and context.game==game then return game.players[context.localSeat or context.seat] end
+  if (guest or cast) and context and context.game==game then return game.players[context.localSeat or context.seat] end
+end
+COOP_EmoteTable=function() return context and context.game end
+COOP_RequestCastEmote=function(game,mode,index)
+  local player=COOP_ControlLocalPlayer(game)
+  if not player or not COOP_HumanOwns(player) or player:IsBusted() then return false end
+  if not guest then return COOP_ApproveLocalEmote and COOP_ApproveLocalEmote(player,game,mode,index) end
+  local line=string.format('CSEAT epoch=%d rev=%d seat=%d hand=%d street=0 turn=0 kind=5 action=%d amount=%d',
+    context.epoch,context.revision,player.index,game.handNumber,mode,index)
+  return COOP_ControlSend(line)==1
 end
 local function send(kind,turn,state,action,amount)
   check()
@@ -184,7 +200,18 @@ local function submit(action)
   if action==1 and call==0 then action=4 end
   local amount=action==2 and ui.amount or (action==1 and math.min(call,p:GetChips()) or 0)
   if not legal(p,action,amount) then trace('ui_illegal_action');return end
-  send(2,ui.turn,ui.state,action,amount);ui.sent=true;refreshUI()
+  if COOP_EmoteClose then COOP_EmoteClose() end
+  if guest then send(2,ui.turn,ui.state,action,amount)
+  else ui.pending={action,amount} end
+  ui.sent=true;refreshUI()
+end
+local function openDecision(player,state,turn)
+  local call=math.max(0,player.parentTable:GetCallValue()-player:GetChipsInPot())
+  ui={player=player,state=state,turn=turn,amount=math.min(player:GetChips(),call+context.minRaise)}
+  ChorePlayAndWait('ui_status_Player_activate.chore')
+  if Input_UseCursor() then CursorHide(false) end
+  ConsoleInput_SetInputEnabled(true);InputMapperActivate('celebrityPoker.imap')
+  HumanPlayerUI_ResetSlider();refreshUI()
 end
 local function setAmount(value)
   if not ui or ui.sent then return end
@@ -301,17 +328,29 @@ AIPlayer.EvaluateAndAct=function(self,state,...)
   Player.EvaluateAndAct(self,state)
   if not guest then
     send(1,turn,state)
+    local localTurn=cast and context.localSeat==self.index
+    if localTurn then openDecision(self,state,turn) end
     while true do
-      local kind,action,amount=take(turn,state)
+      local kind,action,amount
+      if localTurn then
+        check()
+        if ui.pending then
+          kind,action,amount=2,ui.pending[1],ui.pending[2]
+          ui.pending=nil
+        end
+      else kind,action,amount=take(turn,state) end
       if kind then
-        if kind~=2 then fault('expected_intent') end
-        if legal(self,action,amount) then
+        if kind~=2 then fault('expected_intent')
+        elseif legal(self,action,amount) then
           local a,s=apply(self,state,action,amount)
+          if localTurn then ui=nil;ChorePlay('ui_status_Player_deactivate.chore') end
           send(3,turn,state,action,amount)
           return a,s
+        else
+          trace('reject illegal_intent hand='..self.parentTable.handNumber..' turn='..turn)
+          if localTurn then ui.sent=false;refreshUI()
+          else send(4,turn,state) end
         end
-        trace('reject illegal_intent hand='..self.parentTable.handNumber..' turn='..turn)
-        send(4,turn,state)
       end
       Yield()
     end
@@ -323,14 +362,8 @@ AIPlayer.EvaluateAndAct=function(self,state,...)
   end
   local localTurn=not multi or context.localSeat==self.index
   if localTurn then
-    local call=math.max(0,self.parentTable:GetCallValue()-self:GetChipsInPot())
-    ui={player=self,state=state,turn=turn,amount=math.min(self:GetChips(),call+context.minRaise)}
-  -- Borrow the existing local input panel, not HumanPlayer's action evaluator.
-  ChorePlayAndWait('ui_status_Player_activate.chore')
-  if Input_UseCursor() then CursorHide(false) end
-  ConsoleInput_SetInputEnabled(true);InputMapperActivate('celebrityPoker.imap')
-  HumanPlayerUI_ResetSlider();refreshUI()
-  trace('awaiting_guest hand='..self.parentTable.handNumber..' turn='..turn..' seat='..self.index)
+    openDecision(self,state,turn)
+    trace('awaiting_guest hand='..self.parentTable.handNumber..' turn='..turn..' seat='..self.index)
   end
   while true do
     local kind,action,amount=take(turn,state)
@@ -362,7 +395,7 @@ for _,owner in ipairs({AIPlayer,HumanPlayer}) do
     return unpackValues(result,1,result.n)
   end
 end
-if guest then
+if guest or cast then
   for _,spec in ipairs({{'FoldButton',3},{'CallButton',1},{'RaiseButton',2}}) do
     local action=spec[2]
     HumanPlayer[spec[1]]=function() submit(action) end

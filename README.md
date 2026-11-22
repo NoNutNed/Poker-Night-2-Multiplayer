@@ -1,6 +1,6 @@
 # Poker Night 2 Multiplayer
 
-Play a Poker Night 2 tournament with friends. One player hosts, up to four friends take seats from the cast, and the game fills open seats with AI. Everyone stays at the table after elimination and sees the same final standings.
+Play a Poker Night 2 tournament with friends. In Standard mode, the host plays as The Player and up to four friends take cast seats. Four-Player Cast lets the host and up to three guests play as cast characters. AI fills open cast seats in both modes. Everyone stays at the table after elimination and sees the same final standings.
 
 ## Getting started
 
@@ -8,7 +8,7 @@ Play a Poker Night 2 tournament with friends. One player hosts, up to four frien
 
 Use a Windows copy of Poker Night 2 and the same mod release on every machine. See the [play guide](PLAY_GUIDE.md) for installation, hosting, joining, and removal.
 
-This is an early public test for groups on a trusted private network. It supports standard Hold ’em, shared Deal prompts, spectating, and post-match votes for Rematch or Return to Lobby. Treat the table as casual play. The game data synchronized between players includes hidden cards.
+This is an early public test for groups on a trusted private network. It supports Hold ’em, shared Deal prompts, spectating, synchronized cast emotes, and post-match votes for Rematch or Return to Lobby. Treat the table as casual play. The game data synchronized between players includes hidden cards.
 
 ## Reporting bugs
 
@@ -28,7 +28,7 @@ The native proxy and multiplayer transport live in `mod/src/`. The Lua modules i
 
 ## Project status
 
-The first release is focused on testing the complete tournament loop and collecting reproducible reports across different machines. This is an independent fan project for Poker Night 2.
+The project is in public testing. See [GitHub Releases](https://github.com/NoNutNed/Poker-Night-2-Multiplayer/releases) for builds and changes. This is an independent fan project for Poker Night 2.
 
 ## License
 

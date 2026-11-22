@@ -27,8 +27,10 @@ $chunks = [ordered]@{
     coop_bustout = 'COOP_BUSTOUT_LUA'
     coop_control = 'COOP_CONTROL_LUA'
     coop_card_ui = 'COOP_CARD_UI_LUA'
+    coop_tells = 'COOP_TELLS_LUA'
     coop_pacing = 'COOP_PACING_LUA'
     coop_diagnostics = 'COOP_DIAGNOSTICS_LUA'
+    coop_emotes = 'COOP_EMOTES_LUA'
 }
 $header = foreach ($name in $chunks.Keys) {
     'static const char ' + $chunks[$name] + '[] ='
@@ -37,6 +39,18 @@ $header = foreach ($name in $chunks.Keys) {
     }
     ';'
 }
+$header += 'static const char *const COOP_EMOTE_CATALOG[] = {'
+$index = 0
+foreach ($line in Get-Content -LiteralPath (Join-Path $PSScriptRoot 'src/emote_catalog.txt') -Encoding ASCII) {
+    if ($line.StartsWith('#') -or !$line) { continue }
+    if ($line -notmatch '^[1-4]\|[a-z0-9_.-]*\|[a-z0-9_.-]*\|[a-z0-9_.-]+\|[a-z0-9_.-]*\|(?:[a-z0-9_]+\.dlog\|[0-9]{1,20}\|[0-9]{1,10}|\|\|)$') {
+        throw "Invalid emote catalog entry: $line"
+    }
+    if ($index -and $index % 50 -eq 0) { $header += ',' }
+    $header += '"' + $line + '\n"'
+    $index++
+}
+$header += ', NULL };'
 $header | Set-Content -LiteralPath (Join-Path $build 'coop_exchange_lua.h') -Encoding UTF8
 $batch = Join-Path $build 'build.cmd'
 @"

@@ -6,6 +6,8 @@ assert(Game and Game.OnPlayerWin and GameTable and GameTable.InitRound and GameT
 local _,phase,role=COOP_LobbyStatus()
 assert(phase==3 and (role==0 or role==1),'match result lobby role unavailable')
 local guest=role==1
+local cast=select(15,COOP_LobbyStatus())==1
+local seatCount=cast and 4 or 5
 local beginHand,endHand,playerWin=GameTable.InitRound,GameTable.EndRound,Game.OnPlayerWin
 local ledger
 
@@ -14,12 +16,13 @@ local function recordHand(game)
     ledger={game=game,busted={}}
   end
   ledger.starts={}
-  for seat,player in ipairs(game.players) do ledger.starts[seat]=player:GetChips() end
+  for seat=1,seatCount do ledger.starts[seat]=game.players[seat]:GetChips() end
 end
 
 local function recordBustes(game)
   assert(ledger and ledger.game==game,'missing match record')
-  for seat,player in ipairs(game.players) do
+  for seat=1,seatCount do
+    local player=game.players[seat]
     if player:IsBusted() and not ledger.busted[seat] then
       ledger.busted[seat]={seat=seat,hand=game.handNumber,chips=ledger.starts[seat]}
     end
@@ -28,7 +31,8 @@ end
 
 local function finalPlaces(game,winner)
   local ranks,eliminated={},{}
-  for seat,player in ipairs(game.players) do
+  for seat=1,seatCount do
+    local player=game.players[seat]
     if player==winner then ranks[seat]=1
     else eliminated[#eliminated+1]=assert(ledger.busted[seat],'missing elimination') end
   end
@@ -43,7 +47,7 @@ local function finalPlaces(game,winner)
     ranks[item.seat]=rank
     previous=item
   end
-  return table.concat(ranks)
+  return table.concat(ranks)..(cast and '0' or '')
 end
 
 GameTable.InitRound=function(self,...)

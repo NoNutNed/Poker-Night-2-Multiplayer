@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -27,7 +28,7 @@
 #ifdef PN2_SPECTATING_ONLY
 #define PN2_LOBBY_PROTOCOL 14
 #else
-#define PN2_LOBBY_PROTOCOL 17
+#define PN2_LOBBY_PROTOCOL 22
 #endif
 #define PN2_LOBBY_PROTOCOL_TEXT PN2_STRINGIFY(PN2_LOBBY_PROTOCOL)
 
@@ -75,6 +76,12 @@ static void coop_log(const char *fmt, ...) {
         CloseHandle(h);
     }
     LeaveCriticalSection(&g_log_lock);
+}
+
+static void coop_rotate_log(void) {
+    wchar_t previous[MAX_PATH];
+    if (_snwprintf_s(previous, ARRAYSIZE(previous), _TRUNCATE, L"%ls.previous", g_log_path)>0)
+        MoveFileExW(g_log_path,previous,MOVEFILE_REPLACE_EXISTING);
 }
 
 // ---- dinput8 forwarder ----------------------------------------------------
@@ -910,8 +917,13 @@ static const char COOP_WRAPPER_SRC[] =
 "      if nd > #players then nd = 1 end\n"
 "      safety = safety + 1\n"
 "    until (not players[nd]:IsBusted()) or safety > #players\n"
-"    local s = math.random(1, 2000000000)\n"
-"    math.randomseed(s)\n"
+"    -- The playable lobby sends the host's shuffled deck. The engine's\n"
+"    -- dialogue shuffle shares Lua's RNG, so leave its stream alone here.\n"
+"    local s = 0\n"
+"    if not (exchangeTest and COOP_HandReadyInstalled) then\n"
+"      s = math.random(1, 2000000000)\n"
+"      math.randomseed(s)\n"
+"    end\n"
 "    -- Snapshot current chip counts for all 5 seats; guest force-applies\n"
 "    -- these at HAND_START so between-hand drift can't accumulate.\n"
 "    local chipParts = {}\n"
@@ -986,7 +998,7 @@ static ActionItem g_queue[Q_CAP];
 static int g_q_head = 0, g_q_tail = 0;
 static char g_latest_deck[1024] = {0};     // last received SHUFFLE from host
 static volatile LONG g_hand_start_pending = 0;  // set on guest when host says HAND_START
-static volatile LONG g_hand_start_seed    = 0;  // host's math.random seed for this hand
+static volatile LONG g_hand_start_seed    = 0;  // positive legacy seed, or 0 to leave RNG alone
 static volatile LONG g_hand_start_dealer  = 0;  // host's dealer seat index for this hand
 static volatile LONG g_hand_start_chips[5];     // host's chip counts per seat (1..5) for this hand
 // Latest banter-root broadcast from host. Guarded by g_net_lock.
@@ -1018,6 +1030,9 @@ static int  g_host_port   = 47103;
 #include "voice_sync.h"
 #include "lobby.h"
 #include "lobby_discovery.h"
+#ifndef PN2_SPECTATING_ONLY
+#include "banter_selection.h"
+#endif
 
 static BOOL coop_read_config(void) {
     HANDLE h = CreateFileW(g_config_path, GENERIC_READ, FILE_SHARE_READ,
@@ -1540,9 +1555,8 @@ static int __cdecl coop_consume_hand_start(void *L) {
     return 0;
 }
 
-// COOP_HandStartSeed() -> integer math.random seed from last HAND_START (0 if none).
-// Non-destructive read; guest's InitRound wrapper reads this right after
-// ConsumeHandStart returns truthy, then math.randomseed's it before origInit.
+// COOP_HandStartSeed() -> legacy RNG seed from last HAND_START, or 0.
+// The guest applies only a positive seed before InitRound.
 static int __cdecl coop_hand_start_seed(void *L) {
     p_lua_pushinteger(L, (int)g_hand_start_seed);
     return 1;
@@ -1661,6 +1675,11 @@ static int __cdecl coop_install_ai_hook(void *L) {
     presentation_register_lua(L);
     voice_register_lua(L);
 #ifndef PN2_SPECTATING_ONLY
+    if (banter_hook_ready && g_lobby_mode) {
+        p_lua_pushstring(L, "COOP_BanterSelection");
+        p_lua_pushcclosure(L, coop_banter_selection, 0);
+        p_lua_rawset(L, LUA_GLOBALSINDEX);
+    }
     if (g_lobby_mode) {
         p_lua_getfield(L, LUA_GLOBALSINDEX, "loadstring");
         p_lua_pushstring(L, COOP_HAND_READY_LUA);
@@ -1755,9 +1774,9 @@ static int __cdecl coop_install_ai_hook(void *L) {
         return 0;
     }
     if (g_test_mode) {
-        const char *chunks[] = { COOP_EXCHANGE_LUA, COOP_SHOWDOWN_NODES_LUA, COOP_SHOWDOWN_LUA, COOP_BUSTOUT_NODES_LUA, COOP_BUSTOUT_LUA, COOP_CONTROL_LUA, COOP_CARD_UI_LUA, COOP_PACING_LUA, COOP_DIAGNOSTICS_LUA };
-        const char *chunk_names[] = { "exchange", "showdown_nodes", "showdown", "bustout_nodes", "bustout", "control", "card_ui", "pacing", "diagnostics" };
-        for (int i = 0; i < 9; ++i) {
+        const char *chunks[] = { COOP_EXCHANGE_LUA, COOP_SHOWDOWN_NODES_LUA, COOP_SHOWDOWN_LUA, COOP_BUSTOUT_NODES_LUA, COOP_BUSTOUT_LUA, COOP_CONTROL_LUA, COOP_CARD_UI_LUA, COOP_TELLS_LUA, COOP_PACING_LUA, COOP_DIAGNOSTICS_LUA, COOP_EMOTES_LUA };
+        const char *chunk_names[] = { "exchange", "showdown_nodes", "showdown", "bustout_nodes", "bustout", "control", "card_ui", "tells", "pacing", "diagnostics", "emotes" };
+        for (size_t i = 0; i < ARRAYSIZE(chunks); ++i) {
             p_lua_getfield(L, LUA_GLOBALSINDEX, "loadstring");
             p_lua_pushstring(L, chunks[i]);
             if (p_lua_pcall(L, 1, 1, 0) != 0 || p_lua_pcall(L, 0, 0, 0) != 0) {
@@ -1859,7 +1878,7 @@ static BOOL install_coop_hooks(void) {
              p_lua_pushcclosure, p_lua_rawset, p_lua_getfield, p_lua_setfield);
 
     // Shared RWX region for the trampolines.
-    void *tr_page = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE,
+    void *tr_page = VirtualAlloc(NULL, 80, MEM_COMMIT | MEM_RESERVE,
                                  PAGE_EXECUTE_READWRITE);
     if (!tr_page) {
         coop_log("install: VirtualAlloc for trampolines failed, err=%u", GetLastError());
@@ -1904,6 +1923,10 @@ static BOOL install_coop_hooks(void) {
     } else {
         coop_log("install: setagent trampoline install failed");
     }
+#ifndef PN2_SPECTATING_ONLY
+    if (g_orig_choreplay && g_orig_setagent && g_lobby_mode)
+        install_banter_hook(GetModuleHandleW(NULL), (uint8_t *)tr_page + 64);
+#endif
     return g_orig_choreplay && g_orig_setagent;
 }
 
@@ -2224,6 +2247,7 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved) {
         if (!coop_init_paths(hinst)) return TRUE;
         InitializeCriticalSection(&g_log_lock);
         g_log_ready = TRUE;
+        coop_rotate_log();
         HANDLE h = CreateFileW(g_log_path,
                                GENERIC_WRITE, FILE_SHARE_READ, NULL,
                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);

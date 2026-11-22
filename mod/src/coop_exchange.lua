@@ -58,6 +58,9 @@ local function stopAll()
   finishing = nil
   voiceKeys={};cancelledKeys={}
 end
+COOP_ExchangePresentationBusy=function()
+  return next(controllers)~=nil
+end
 local function recordEnd(event)
   completed[event.key]=true
   trace('end epoch=' .. tostring(event.epoch) .. ' seq=' .. tostring(event.seq) .. ' key=' .. event.key)
@@ -94,6 +97,8 @@ local function updateReady()
     if (epoch ~= activeEpoch or ready) and COOP_PaceReset then COOP_PaceReset() end
     if (epoch ~= activeEpoch or ready) and COOP_ShowdownReset then COOP_ShowdownReset() end
     if (epoch ~= activeEpoch or ready) and COOP_BustoutReset then COOP_BustoutReset(nowReady and gameplay) end
+    if (epoch ~= activeEpoch or ready) and COOP_TellReset then COOP_TellReset() end
+    if (epoch ~= activeEpoch or ready) and COOP_EmoteReset then COOP_EmoteReset(true) end
     activeEpoch = epoch
   end
   if nowReady ~= ready then trace(nowReady and ('ready epoch=' .. tostring(epoch)) or 'waiting_or_stopped') end
@@ -255,6 +260,30 @@ if guest then
   -- both string selectors AND userdata-node DlgRun calls during gameplay.
   Dialogue.StartBanter = function() end
   Dialogue.UpdateBanter = function() end
+elseif COOP_BanterSelection and Dialogue.OnNodeBegin then
+  local selection=COOP_BanterSelection
+  local startBanter,onNodeBegin=Dialogue.StartBanter,Dialogue.OnNodeBegin
+  local function finishBanterSelection(...)
+    selection('end')
+    return ...
+  end
+  Dialogue.StartBanter=function(self,...)
+    if not (COOP_SessionActive and COOP_SessionActive() and Logic and Logic.bInGame==true) or
+       Logic.bModeInstant or Logic.bPauseBanter or Logic.bBanterPlaying then
+      return startBanter(self,...)
+    end
+    selection('begin')
+    return finishBanterSelection(startBanter(self,...))
+  end
+  Dialogue.OnNodeBegin=function(self,dlg,node,...)
+    local previous=self.banterSequenceRootID
+    onNodeBegin(self,dlg,node,...)
+    -- This stock method runs only for the current banter graph. Report the
+    -- root after the game accepts it and fills the banter playback list.
+    if dlg=='banter.dlog' and self.banterSequenceRootID==node and previous~=node then
+      selection('accept',tostring(node))
+    end
+  end
 end
 
 ThreadStart(function()
@@ -295,7 +324,10 @@ ThreadStart(function()
             trace('host_resource_fallback seq=' .. tostring(seq))
           end
           local played, controller=true,nil
-          if not skip then played,controller=pcall(play,chore) end
+          if not skip then
+            if COOP_EmotePreempt then COOP_EmotePreempt() end
+            played,controller=pcall(play,chore)
+          end
           if not skip and (not played or not controller) then
             trace('play_failed seq=' .. tostring(seq) .. ' chore=' .. tostring(chore))
             COOP_ExchangeAbort(); stopAll(); break
@@ -336,6 +368,13 @@ ThreadStart(function()
           COOP_BustoutReceive(kind,dlg,node,authoredChore,key)
           local names={[8]='bust_chore',[9]='bust_state',[10]='bust_done'}
           trace(names[kind]..' epoch='..tostring(activeEpoch)..' seq='..tostring(seq)..' key='..key)
+        elseif kind == 12 then
+          if not COOP_TellReceive then
+            trace('tells_not_installed'); COOP_ExchangeAbort(); stopAll(); break
+          end
+          COOP_TellReceive(dlg,node,authoredChore,key)
+        elseif kind == 13 and COOP_EmoteReceive then
+          COOP_EmoteReceive(dlg,node,authoredChore,key)
         end
       end
       if COOP_ShowdownTick then COOP_ShowdownTick() end

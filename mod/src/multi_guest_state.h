@@ -29,6 +29,7 @@ static int __cdecl mp_options(void *L);
 static void mp_server_loop(SOCKET listener);
 static void net_handle_line(const char *line);
 static int lb_phase, lb_error;
+static unsigned lb_cast_only, lb_host_seat;
 static void lb_connected_locked(int slot);
 static void lb_disconnected_locked(int slot);
 static int lb_handle_line(const char *line);
